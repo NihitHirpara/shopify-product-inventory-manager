@@ -39,11 +39,17 @@ export async function saveWebhookEvent({
 }
 
 /** Used by products + inventory webhook routes */
-export async function logIncomingWebhook(shop, topic, payload) {
+export async function logIncomingWebhook(shop, topic, payload, webhookId) {
   try {
+    if (await isDuplicateWebhook(shop, topic, payload, webhookId)) {
+      console.log(`Skipped duplicate ${topic} webhook for ${shop}`);
+      return;
+    }
+
     await saveWebhookEvent({
       shopDomain: shop,
       topic,
+      webhookId: webhookId || null,
       payload: payload || {},
       status: "processed",
     });
@@ -53,6 +59,7 @@ export async function logIncomingWebhook(shop, topic, payload) {
       await saveWebhookEvent({
         shopDomain: shop,
         topic,
+        webhookId: webhookId || null,
         payload: payload || {},
         status: "failed",
         error: error.message,
@@ -61,6 +68,26 @@ export async function logIncomingWebhook(shop, topic, payload) {
       console.error("Could not save failed webhook log:", persistError);
     }
   }
+}
+
+async function isDuplicateWebhook(shop, topic, payload, webhookId) {
+  if (webhookId) {
+    const sameDelivery = await prisma.webhookEvent.findFirst({
+      where: { shopDomain: shop, webhookId },
+    });
+    if (sameDelivery) return true;
+  }
+
+  const fingerprint = webhookFingerprint(topic, payload || {});
+  if (!fingerprint) return false;
+
+  const recent = await prisma.webhookEvent.findMany({
+    where: { shopDomain: shop, topic },
+    orderBy: { createdAt: "desc" },
+    take: 20,
+  });
+
+  return recent.some((event) => event.payload?.fingerprint === fingerprint);
 }
 
 export async function listWebhookEvents(shopDomain, { topic = "" } = {}) {
@@ -96,9 +123,11 @@ function summarizeWebhook(topic, payload) {
   }
 
   const t = String(topic || "").toUpperCase();
+  const fingerprint = webhookFingerprint(topic, payload);
 
   if (t.includes("INVENTORY")) {
     return {
+      fingerprint,
       summary: `Available → ${payload.available ?? "?"}`,
       inventory_item_id: payload.inventory_item_id,
       location_id: payload.location_id,
@@ -110,6 +139,7 @@ function summarizeWebhook(topic, payload) {
 
   if (t.includes("PRODUCT")) {
     return {
+      fingerprint,
       summary: payload.title
         ? `Product “${payload.title}” (${t})`
         : `Product event (${t})`,
@@ -122,5 +152,41 @@ function summarizeWebhook(topic, payload) {
     };
   }
 
-  return { summary: `Webhook ${topic}`, raw: payload };
+  return { fingerprint, summary: `Webhook ${topic}`, raw: payload };
+}
+
+/** Ignore timestamps so Shopify's extra update pings don't create extra log rows. */
+function webhookFingerprint(topic, payload) {
+  const t = String(topic || "").toUpperCase();
+
+  if (t.includes("INVENTORY")) {
+    return JSON.stringify({
+      t,
+      item: payload.inventory_item_id,
+      loc: payload.location_id,
+      available: payload.available,
+    });
+  }
+
+  if (t.includes("PRODUCT")) {
+    const variants = Array.isArray(payload.variants)
+      ? payload.variants.map((v) => ({
+          id: v.id,
+          sku: v.sku,
+          title: v.title,
+          qty: v.inventory_quantity,
+        }))
+      : [];
+
+    return JSON.stringify({
+      t,
+      id: payload.id,
+      title: payload.title,
+      handle: payload.handle,
+      status: payload.status,
+      variants,
+    });
+  }
+
+  return null;
 }
