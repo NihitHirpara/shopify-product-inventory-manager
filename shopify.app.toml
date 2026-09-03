@@ -2,7 +2,7 @@
 
 client_id = "76b4d62e79e0d09641bdb4d84fc3a070"
 name = "product-inventory-manager"
-application_url = "https://example.com"
+application_url = "https://shopify-product-inventory-manager.onrender.com"
 embedded = true
 
 [build]
@@ -32,4 +32,4 @@ api_version = "2026-10"
 scopes = "read_products,write_products,read_inventory,write_inventory,read_locations"
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [ "https://shopify-product-inventory-manager.onrender.com/api/auth" ]
