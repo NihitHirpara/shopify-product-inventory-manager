@@ -90,17 +90,44 @@ async function isDuplicateWebhook(shop, topic, payload, webhookId) {
   return recent.some((event) => event.payload?.fingerprint === fingerprint);
 }
 
-export async function listWebhookEvents(shopDomain, { topic = "" } = {}) {
-  const events = await prisma.webhookEvent.findMany({
+export async function listWebhookEvents(
+  shopDomain,
+  { topic = "", page = 1, pageSize = 10 } = {},
+) {
+  const safePageSize = Math.min(Math.max(Number(pageSize) || 10, 5), 25);
+  const safePage = Math.max(Number(page) || 1, 1);
+  const skip = (safePage - 1) * safePageSize;
+  const needle = String(topic || "").trim();
+
+  // Fetch a window then filter when topic is set (works for Mongo + avoids provider filter quirks).
+  if (!needle) {
+    const [total, events] = await Promise.all([
+      prisma.webhookEvent.count({ where: { shopDomain } }),
+      prisma.webhookEvent.findMany({
+        where: { shopDomain },
+        orderBy: { createdAt: "desc" },
+        skip,
+        take: safePageSize,
+      }),
+    ]);
+
+    return { events, total, page: safePage, pageSize: safePageSize };
+  }
+
+  const all = await prisma.webhookEvent.findMany({
     where: { shopDomain },
     orderBy: { createdAt: "desc" },
-    take: 50,
   });
+  const filtered = all.filter((e) =>
+    e.topic.toLowerCase().includes(needle.toLowerCase()),
+  );
 
-  if (!topic) return events;
-
-  const needle = topic.toLowerCase();
-  return events.filter((e) => e.topic.toLowerCase().includes(needle));
+  return {
+    events: filtered.slice(skip, skip + safePageSize),
+    total: filtered.length,
+    page: safePage,
+    pageSize: safePageSize,
+  };
 }
 
 export async function markShopUninstalled(shopDomain) {

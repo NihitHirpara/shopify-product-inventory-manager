@@ -56,7 +56,15 @@ export default function ProductTable({
                   <s-table-cell>
                     <s-text color="subdued">{product.skus || "—"}</s-text>
                   </s-table-cell>
-                  <s-table-cell>{product.totalInventory}</s-table-cell>
+                  <s-table-cell>
+                    <s-badge
+                      tone={
+                        product.totalInventory > 0 ? "success" : "warning"
+                      }
+                    >
+                      {product.totalInventory}
+                    </s-badge>
+                  </s-table-cell>
                   <s-table-cell>
                     <s-button
                       href={`/app/products/${toProductParam(product.id)}`}

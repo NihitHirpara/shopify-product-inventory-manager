@@ -27,10 +27,23 @@ const PRODUCTS_LIST_QUERY = `#graphql
             url
             altText
           }
-          variants(first: 25) {
+          variants(first: 50) {
             edges {
               node {
                 sku
+                inventoryQuantity
+                inventoryItem {
+                  inventoryLevels(first: 25) {
+                    edges {
+                      node {
+                        quantities(names: ["available"]) {
+                          name
+                          quantity
+                        }
+                      }
+                    }
+                  }
+                }
               }
             }
           }
@@ -75,6 +88,8 @@ const PRODUCT_DETAIL_QUERY = `#graphql
                   node {
                     location {
                       id
+                      name
+                      isActive
                     }
                     quantities(names: ["available"]) {
                       name
@@ -88,12 +103,13 @@ const PRODUCT_DETAIL_QUERY = `#graphql
         }
       }
     }
-    locations(first: 10) {
+    locations(first: 50) {
       edges {
         node {
           id
           name
           isActive
+          fulfillsOnlineOrders
         }
       }
     }
@@ -156,21 +172,39 @@ export async function fetchProductsPage(admin, { search, after, before }) {
 
   const connection = json.data?.products;
   const products = (connection?.edges || []).map(({ node }) => {
-    const skus = (node.variants?.edges || [])
+    const variantEdges = node.variants?.edges || [];
+    const skus = variantEdges
       .map(({ node: v }) => v.sku)
       .filter(Boolean)
       .slice(0, 3)
       .join(", ");
 
+    // Shopify product.totalInventory can be 0 while location "available" has stock.
+    // Prefer summing inventoryLevels available across variants/locations.
+    const summedAvailable = variantEdges.reduce((sum, { node: v }) => {
+      const levels = v.inventoryItem?.inventoryLevels?.edges || [];
+      const levelSum = levels.reduce((levelTotal, { node: level }) => {
+        const available = (level.quantities || []).find(
+          (q) => q.name === "available",
+        );
+        return levelTotal + (available?.quantity ?? 0);
+      }, 0);
+      if (levels.length > 0) return sum + levelSum;
+      return sum + (v.inventoryQuantity ?? 0);
+    }, 0);
+
+    const totalInventory =
+      summedAvailable > 0 ? summedAvailable : (node.totalInventory ?? 0);
+
     return {
       id: node.id,
       title: node.title,
       status: node.status,
-      totalInventory: node.totalInventory ?? 0,
+      totalInventory,
       imageUrl: node.featuredImage?.url || null,
       imageAlt: node.featuredImage?.altText || node.title,
       variantCount:
-        node.variantsCount?.count ?? node.variants?.edges?.length ?? 0,
+        node.variantsCount?.count ?? variantEdges.length ?? 0,
       skus,
     };
   });
@@ -194,44 +228,105 @@ export async function fetchProductDetail(admin, productGid) {
   const node = json.data?.product;
   if (!node) return { product: null, locations: [] };
 
+  const variants = (node.variants?.edges || []).map(({ node: v }) => {
+    const inventoryByLocation = {};
+    for (const { node: level } of v.inventoryItem?.inventoryLevels?.edges ||
+      []) {
+      const locId = level.location?.id;
+      if (!locId) continue;
+      const available = (level.quantities || []).find(
+        (q) => q.name === "available",
+      );
+      inventoryByLocation[locId] = available?.quantity ?? 0;
+    }
+
+    const locationSum = Object.values(inventoryByLocation).reduce(
+      (sum, qty) => sum + (Number(qty) || 0),
+      0,
+    );
+
+    return {
+      id: v.id,
+      title: v.title,
+      sku: v.sku || "",
+      inventoryQuantity:
+        locationSum > 0 ? locationSum : (v.inventoryQuantity ?? 0),
+      inventoryByLocation,
+      inventoryItemId: v.inventoryItem?.id || null,
+    };
+  });
+
+  const summedInventory = variants.reduce(
+    (sum, v) => sum + (v.inventoryQuantity ?? 0),
+    0,
+  );
+
   const product = {
     id: node.id,
     title: node.title,
     status: node.status,
     description: node.description || "",
-    totalInventory: node.totalInventory ?? 0,
+    totalInventory:
+      summedInventory > 0 ? summedInventory : (node.totalInventory ?? 0),
     imageUrl: node.featuredImage?.url || null,
     imageAlt: node.featuredImage?.altText || node.title,
-    variants: (node.variants?.edges || []).map(({ node: v }) => {
-      const inventoryByLocation = {};
-      for (const { node: level } of v.inventoryItem?.inventoryLevels?.edges ||
-        []) {
-        const locId = level.location?.id;
-        if (!locId) continue;
-        const available = (level.quantities || []).find(
-          (q) => q.name === "available",
-        );
-        inventoryByLocation[locId] = available?.quantity ?? 0;
-      }
-
-      return {
-        id: v.id,
-        title: v.title,
-        sku: v.sku || "",
-        inventoryQuantity: v.inventoryQuantity ?? 0,
-        inventoryByLocation,
-        inventoryItemId: v.inventoryItem?.id || null,
-      };
-    }),
+    variants,
   };
 
-  const locations = (json.data?.locations?.edges || [])
-    .map(({ node: loc }) => ({
-      id: loc.id,
-      name: loc.name,
-      isActive: loc.isActive,
-    }))
+  // Only locations where THIS product is stocked (same as Shopify Admin product page).
+  // Listing every active shop location caused "My Custom Location" to appear even when
+  // the product has no inventory level there — and setQuantities then fails.
+  const stockedLocationIds = new Set();
+  for (const variant of variants) {
+    for (const locId of Object.keys(variant.inventoryByLocation || {})) {
+      stockedLocationIds.add(locId);
+    }
+  }
+
+  const locationNameById = new Map();
+  for (const { node: v } of node.variants?.edges || []) {
+    for (const { node: level } of v.inventoryItem?.inventoryLevels?.edges ||
+      []) {
+      if (level.location?.id && level.location?.name) {
+        locationNameById.set(level.location.id, {
+          id: level.location.id,
+          name: level.location.name,
+          isActive: level.location.isActive !== false,
+        });
+      }
+    }
+  }
+
+  let locations = [...stockedLocationIds]
+    .map((id) => locationNameById.get(id))
+    .filter(Boolean)
     .filter((l) => l.isActive);
+
+  // Fallback: if levels had no names, resolve from shop locations list.
+  if (locations.length === 0 && stockedLocationIds.size > 0) {
+    locations = (json.data?.locations?.edges || [])
+      .map(({ node: loc }) => ({
+        id: loc.id,
+        name: loc.name,
+        isActive: loc.isActive,
+      }))
+      .filter((l) => l.isActive && stockedLocationIds.has(l.id));
+  }
+
+  // Last resort: single primary active location that fulfills online orders.
+  if (locations.length === 0) {
+    locations = (json.data?.locations?.edges || [])
+      .map(({ node: loc }) => ({
+        id: loc.id,
+        name: loc.name,
+        isActive: loc.isActive,
+        fulfillsOnlineOrders: loc.fulfillsOnlineOrders,
+      }))
+      .filter((l) => l.isActive)
+      .sort((a, b) => Number(b.fulfillsOnlineOrders) - Number(a.fulfillsOnlineOrders))
+      .slice(0, 1)
+      .map(({ id, name, isActive }) => ({ id, name, isActive }));
+  }
 
   return { product, locations };
 }

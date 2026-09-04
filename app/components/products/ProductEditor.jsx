@@ -15,11 +15,15 @@ export default function ProductEditor({
   setDraftQty,
   draftStatus,
   setDraftStatus,
-  busy,
+  busyStatus,
+  busyInventory,
   error,
   onSaveInventory,
   onSaveStatus,
 }) {
+  const anyBusy = busyStatus || busyInventory;
+  const statusDirty = draftStatus !== product.status;
+
   return (
     <>
       <s-section heading="Product details">
@@ -54,6 +58,10 @@ export default function ProductEditor({
       </s-section>
 
       <s-section heading="Update product status">
+        <s-paragraph color="subdued">
+          Change status and/or quantity, then click either Save — both pending
+          changes are applied together.
+        </s-paragraph>
         <s-grid gridTemplateColumns="1fr auto" gap="base" alignItems="end">
           <s-select
             label="Product status"
@@ -70,8 +78,8 @@ export default function ProductEditor({
             type="button"
             variant="primary"
             icon="save"
-            disabled={busy || draftStatus === product.status || undefined}
-            {...(busy ? { loading: true } : {})}
+            disabled={anyBusy || !statusDirty || undefined}
+            {...(busyStatus ? { loading: true } : {})}
             onClick={onSaveStatus}
           >
             Save status
@@ -81,7 +89,9 @@ export default function ProductEditor({
 
       <s-section heading="Update inventory">
         <s-paragraph color="subdued">
-          Set quantity for a variant at the selected location.
+          Set quantity for a variant at a location where this product is
+          stocked. If status was also changed above, Save here updates status
+          too.
         </s-paragraph>
 
         {error ? (
@@ -106,7 +116,7 @@ export default function ProductEditor({
           </s-box>
         ) : (
           <s-banner tone="warning" heading="No locations">
-            No active inventory locations found on this shop.
+            No stocked inventory locations found for this product.
           </s-banner>
         )}
 
@@ -120,10 +130,13 @@ export default function ProductEditor({
           </s-table-header-row>
           <s-table-body>
             {product.variants.map((variant) => {
-              const qtyAtLocation =
+              const atLocation =
                 locationId && variant.inventoryByLocation?.[locationId] != null
                   ? variant.inventoryByLocation[locationId]
                   : (variant.inventoryQuantity ?? 0);
+              const draft = Number(draftQty[variant.id]);
+              const qtyDirty =
+                Number.isFinite(draft) && draft !== atLocation;
 
               return (
                 <s-table-row key={variant.id}>
@@ -133,7 +146,7 @@ export default function ProductEditor({
                   <s-table-cell>
                     <s-text color="subdued">{variant.sku || "—"}</s-text>
                   </s-table-cell>
-                  <s-table-cell>{qtyAtLocation}</s-table-cell>
+                  <s-table-cell>{atLocation}</s-table-cell>
                   <s-table-cell>
                     <s-number-field
                       label={`Quantity for ${variant.title}`}
@@ -164,14 +177,15 @@ export default function ProductEditor({
                       disabled={
                         !variant.inventoryItemId ||
                         !locationId ||
-                        busy ||
+                        anyBusy ||
+                        (!qtyDirty && !statusDirty) ||
                         undefined
                       }
-                      {...(busy ? { loading: true } : {})}
+                      {...(busyInventory ? { loading: true } : {})}
                       onClick={() =>
                         onSaveInventory({
                           ...variant,
-                          inventoryQuantity: qtyAtLocation,
+                          inventoryQuantity: atLocation,
                         })
                       }
                     >
